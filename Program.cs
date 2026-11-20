@@ -20,6 +20,7 @@ internal static class Program
             }
 
             var cityPath = input[0];
+            var packagesPath = input[1];
             var start = input[2];
 
             var map = CityFile.Load(cityPath);
@@ -29,7 +30,14 @@ internal static class Program
                 return 1;
             }
 
-            PrintHeader(map, start);
+            var packages = PackageFile.Load(packagesPath, map.Graph);
+            var planner = new RoutePlanner(map.Graph, packages, start);
+
+            PrintHeader(map, start, packages.Count);
+            Console.WriteLine();
+
+            var route = planner.Plan();
+            Console.Write(RoutePrinter.Format(planner, start, route));
             return 0;
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException
@@ -56,9 +64,9 @@ internal static class Program
         return Console.ReadLine()?.Trim() ?? "";
     }
 
-    private static void PrintHeader(CityMap map, string start)
+    private static void PrintHeader(CityMap map, string start, int packageCount)
     {
         Console.WriteLine($"Posición inicial: {start}");
-        Console.WriteLine($"Ubicaciones: {map.Graph.VertexCount}   Calles: {map.StreetCount} ({map.OneWayCount} de un solo sentido)");
+        Console.WriteLine($"Paquetes: {packageCount}   Ubicaciones: {map.Graph.VertexCount}   Calles: {map.StreetCount} ({map.OneWayCount} de un solo sentido)");
     }
 }
