@@ -2,6 +2,10 @@ namespace Backend;
 
 public class RoutePlanner
 {
+    private const int Seed = 2026;
+    private const int Restarts = 400;
+    private const double Epsilon = 1e-9;
+
     private readonly IReadOnlyList<Package> _packages;
     private readonly string _start;
     private readonly Dictionary<string, ShortestPaths> _paths = [];
@@ -108,6 +112,45 @@ public class RoutePlanner
         return ToStops(route);
     }
 
+    public List<Stop> Plan()
+    {
+        var n = _packages.Count;
+        var random = new Random(Seed);
+        var order = Enumerable.Range(0, n).ToArray();
+        List<int> best = [];
+        var bestCost = double.PositiveInfinity;
+
+        for (var attempt = 0; attempt < Restarts; attempt++)
+        {
+            if (attempt > 0)
+            {
+                random.Shuffle(order);
+            }
+
+            var route = new List<int>(2 * n);
+            foreach (var p in order)
+            {
+                CheapestInsertion(route, p);
+            }
+
+            Improve(route);
+            var cost = Cost(route);
+            if (cost < bestCost - Epsilon)
+            {
+                best = route;
+                bestCost = cost;
+            }
+        }
+
+        var stops = ToStops(best);
+        if (!IsValid(stops))
+        {
+            throw new InvalidOperationException("La ruta calculada no es válida.");
+        }
+
+        return stops;
+    }
+
     public double TotalDistance(IReadOnlyList<Stop> route)
     {
         var total = 0.0;
@@ -167,6 +210,169 @@ public class RoutePlanner
         }
 
         return paths;
+    }
+
+    private void CheapestInsertion(List<int> route, int p)
+    {
+        var m = route.Count;
+        var pickup = _taskPoint[p];
+        var delivery = _taskPoint[p + _packages.Count];
+        var bestPickupGap = 0;
+        var bestDeliveryGap = 0;
+        var bestIncrease = double.PositiveInfinity;
+
+        void Consider(int pickupGap, int deliveryGap, double increase)
+        {
+            if (increase < bestIncrease)
+            {
+                bestPickupGap = pickupGap;
+                bestDeliveryGap = deliveryGap;
+                bestIncrease = increase;
+            }
+        }
+
+        for (var i = 0; i <= m; i++)
+        {
+            var a = PointBefore(route, i);
+            if (i == m)
+            {
+                // both go after the last stop
+                Consider(i, i, _legs[a, pickup] + _legs[pickup, delivery]);
+                continue;
+            }
+
+            var b = _taskPoint[route[i]];
+            // delivery right after the pickup splits a single leg
+            Consider(i, i, _legs[a, pickup] + _legs[pickup, delivery] + _legs[delivery, b] - _legs[a, b]);
+
+            var pickupIncrease = _legs[a, pickup] + _legs[pickup, b] - _legs[a, b];
+            for (var j = i + 1; j < m; j++)
+            {
+                var c = _taskPoint[route[j - 1]];
+                var e = _taskPoint[route[j]];
+                // pickup and delivery each split their own leg
+                Consider(i, j, pickupIncrease + _legs[c, delivery] + _legs[delivery, e] - _legs[c, e]);
+            }
+
+            // the pickup splits a leg and the delivery goes after the last stop
+            Consider(i, m, pickupIncrease + _legs[_taskPoint[route[m - 1]], delivery]);
+        }
+
+        route.Insert(bestDeliveryGap, p + _packages.Count);
+        route.Insert(bestPickupGap, p);
+    }
+
+    private void Improve(List<int> route)
+    {
+        bool improved;
+        do
+        {
+            var movedPackages = RelocatePackages(route);
+            var movedStops = RelocateStops(route);
+            improved = movedPackages || movedStops;
+        }
+        while (improved);
+    }
+
+    private bool RelocatePackages(List<int> route)
+    {
+        var n = _packages.Count;
+        var improvedAny = false;
+        bool improved;
+        do
+        {
+            improved = false;
+            for (var p = 0; p < n; p++)
+            {
+                var candidate = new List<int>(route);
+                candidate.Remove(p);
+                candidate.Remove(p + n);
+                CheapestInsertion(candidate, p);
+
+                if (Cost(candidate) < Cost(route) - Epsilon)
+                {
+                    route.Clear();
+                    route.AddRange(candidate);
+                    improved = true;
+                    improvedAny = true;
+                }
+            }
+        }
+        while (improved);
+
+        return improvedAny;
+    }
+
+    private bool RelocateStops(List<int> route)
+    {
+        var n = _packages.Count;
+        var improvedAny = false;
+        bool improved;
+        do
+        {
+            improved = false;
+            for (var k = 0; k < route.Count; k++)
+            {
+                var task = route[k];
+                var point = _taskPoint[task];
+                route.RemoveAt(k);
+                var removalGain = InsertionIncrease(route, k, point);
+
+                // a pickup stays before its delivery and a delivery after its pickup
+                var partnerAt = route.IndexOf(task < n ? task + n : task - n);
+                var firstGap = task < n ? 0 : partnerAt + 1;
+                var lastGap = task < n ? partnerAt : route.Count;
+
+                var bestGap = k;
+                var bestIncrease = removalGain - Epsilon;
+                for (var gap = firstGap; gap <= lastGap; gap++)
+                {
+                    var increase = InsertionIncrease(route, gap, point);
+                    if (increase < bestIncrease)
+                    {
+                        bestGap = gap;
+                        bestIncrease = increase;
+                    }
+                }
+
+                route.Insert(bestGap, task);
+                if (bestGap != k)
+                {
+                    improved = true;
+                    improvedAny = true;
+                }
+            }
+        }
+        while (improved);
+
+        return improvedAny;
+    }
+
+    private double InsertionIncrease(List<int> route, int gap, int point)
+    {
+        var a = PointBefore(route, gap);
+        if (gap == route.Count)
+        {
+            return _legs[a, point];
+        }
+
+        var b = _taskPoint[route[gap]];
+        return _legs[a, point] + _legs[point, b] - _legs[a, b];
+    }
+
+    private int PointBefore(List<int> route, int gap) => gap == 0 ? _startPoint : _taskPoint[route[gap - 1]];
+
+    private double Cost(List<int> route)
+    {
+        var total = 0.0;
+        var current = _startPoint;
+        foreach (var task in route)
+        {
+            total += _legs[current, _taskPoint[task]];
+            current = _taskPoint[task];
+        }
+
+        return total;
     }
 
     private List<Stop> ToStops(List<int> route)
